@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>What am I feeling?</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 820px; margin: 2rem auto; padding: 0 1rem; color: #222; }
+  h1 { font-size: 1.8rem; font-family: "Comic Sans MS", "Comic Sans", "Chalkboard SE", cursive; }
+  textarea { width: 100%; height: 6rem; padding: .6rem; font: inherit; box-sizing: border-box; }
+  .row { display: flex; gap: .6rem; align-items: center; margin: .6rem 0; }
+  input[type=text] { padding: .4rem; font: inherit; width: 10rem; }
+  button { padding: .5rem 1rem; font: inherit; cursor: pointer; }
+  #status { min-height: 1.4rem; color: #555; }
+  #status.error { color: #b00020; }
+  #chips { display: flex; flex-wrap: wrap; gap: .4rem; margin: .4rem 0 1rem; }
+  .chip { padding: .2rem .7rem; border-radius: 999px; color: #fff; font-size: .9rem; text-shadow: 0 0 2px rgba(0,0,0,.5); }
+  #stage { position: relative; }
+  #stage img, #stage svg { display: block; width: 100%; height: auto; }
+  #stage svg { position: absolute; inset: 0; }
+  svg polygon { fill: transparent; stroke: none; transition: fill .3s; }
+  svg.has-selection polygon:not(.on) { fill: rgba(255, 255, 255, .78); }
+  svg polygon.on { stroke: #111; stroke-width: 3; stroke-linejoin: round; }
+  footer { margin: 1.5rem 0 1rem; font-size: .75rem; color: #999; text-align: center; }
+  footer a { color: inherit; }
+</style>
+</head>
+<body>
+<h1>Hmm what am I feeling...</h1>
+<textarea id="text" placeholder="Paste or type some text…"></textarea>
+<div class="row">
+  <label>Model <input type="text" id="model" value="llama3.2"></label>
+  <button id="go">Analyze</button>
+  <button id="example" type="button">Try an example</button>
+</div>
+<div id="status"></div>
+<div id="chips"></div>
+<div id="stage">
+  <img src="wheel.png" alt="Watercolor emotion wheel">
+  <svg id="overlay" viewBox="0 0 1530 1392"></svg>
+</div>
+<footer>
+  Emotions wheel taken from @avanmuijen:
+  <a href="https://www.avanmuijen.com/watercolor-emotion-wheel">https://www.avanmuijen.com/watercolor-emotion-wheel</a>
+</footer>
+
+<script src="regions.js"></script>
+<script>
+const NS = "http://www.w3.org/2000/svg";
+const CORE_COLORS = {
+  Joy: "#e0a417", Genius: "#e8691c", Anger: "#b32d2e",
+  Sad: "#3f5fb0", Fear: "#8a2f63", Disgust: "#5a9437",
+};
+const $ = id => document.getElementById(id);
+const polygons = new Map(); // lowercase word -> <polygon>
+const WORDS = REGIONS.map(r => r.word);
+
+for (const region of REGIONS) {
+  const poly = document.createElementNS(NS, "polygon");
+  poly.setAttribute("points", region.points.map(p => p.join(",")).join(" "));
+  poly.dataset.word = region.word;
+  poly.dataset.core = region.core;
+  const title = document.createElementNS(NS, "title");
+  title.textContent = region.word;
+  poly.appendChild(title);
+  $("overlay").appendChild(poly);
+  polygons.set(region.word.toLowerCase(), poly);
+}
+
+function showEmotions(words) {
+  polygons.forEach(p => p.classList.remove("on"));
+  $("chips").replaceChildren();
+  const found = [];
+  for (const w of words) {
+    const poly = polygons.get(String(w).trim().toLowerCase());
+    if (poly && !found.includes(poly)) found.push(poly);
+  }
+  $("overlay").classList.toggle("has-selection", found.length > 0);
+  for (const poly of found) {
+    poly.classList.add("on");
+    $("overlay").appendChild(poly); // bring to front so the outline isn't covered
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    chip.style.background = CORE_COLORS[poly.dataset.core];
+    chip.textContent = poly.dataset.word;
+    $("chips").appendChild(chip);
+  }
+  return found.length;
+}
+
+async function analyze() {
+  const text = $("text").value.trim();
+  const status = $("status");
+  if (!text) return;
+  status.className = "";
+  status.textContent = "Thinking…";
+  $("go").disabled = true;
+  try {
+    const res = await fetch("/api/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: $("model").value.trim(),
+        prompt: `Text:\n"""\n${text}\n"""\n\nWhat are the possible feelings of the speaker? ` +
+                `Answer with 3 to 6 emotion words, chosen only from this list: ${WORDS.join(", ")}.`,
+        stream: false,
+        format: {
+          type: "object",
+          properties: { emotions: { type: "array", items: { type: "string", enum: WORDS } } },
+          required: ["emotions"],
+        },
+      }),
+    });
+    if (!res.ok) {
+      throw new Error(res.status === 404
+        ? `Model '${$("model").value}' not found. Run: ollama pull ${$("model").value}`
+        : `Server returned HTTP ${res.status}: ${await res.text()}`);
+    }
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    const { emotions } = JSON.parse(data.response);
+    const n = showEmotions(emotions || []);
+    status.textContent = n ? "" : "The model didn't return any emotions from the wheel.";
+  } catch (e) {
+    status.className = "error";
+    status.textContent = e.message;
+  } finally {
+    $("go").disabled = false;
+  }
+}
+
+const EXAMPLE_TEXT = `“I’m sure those are not the right words,” said poor Alice, and her eyes filled with tears again as she went on, “I must be Mabel after all, and I shall have to go and live in that poky little house, and have next to no toys to play with, and oh! ever so many lessons to learn! No, I’ve made up my mind about it; if I’m Mabel, I’ll stay down here! It’ll be no use their putting their heads down and saying ‘Come up again, dear!’ I shall only look up and say ‘Who am I then? Tell me that first, and then, if I like being that person, I’ll come up: if not, I’ll stay down here till I’m somebody else’—but, oh dear!” cried Alice, with a sudden burst of tears, “I do wish they would put their heads down! I am so very tired of being all alone here!”
+As she said this she looked down at her hands, and was surprised to see that she had put on one of the Rabbit’s little white kid gloves while she was talking. “How can I have done that?” she thought. “I must be growing small again.” She got up and went to the table to measure herself by it, and found that, as nearly as she could guess, she was now about two feet high, and was going on shrinking rapidly: she soon found out that the cause of this was the fan she was holding, and she dropped it hastily, just in time to avoid shrinking away altogether.`;
+
+$("example").addEventListener("click", () => {
+  $("text").value = EXAMPLE_TEXT;
+  $("text").focus();
+});
+$("go").addEventListener("click", analyze);
+$("text").addEventListener("keydown", e => {
+  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) analyze();
+});
+</script>
+</body>
+</html>
